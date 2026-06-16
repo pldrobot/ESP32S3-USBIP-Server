@@ -1,0 +1,35 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/dist/
+/build/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Test cache and coverage
+*.test
+*.out
+coverage.html
+
+# Dependency vendor directory (if not vendoring)
+# vendor/
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config (keep example)
+config.json
