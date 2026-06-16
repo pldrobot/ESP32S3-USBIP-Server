@@ -1,0 +1,18 @@
+{
+  "connections": [
+    {
+      "name": "Pi USB Hub",
+      "host": "192.168.1.10",
+      "port": 3240,
+      "bus_id": "1-1",
+      "auto_connect": false
+    },
+    {
+      "name": "ESP32 Printer",
+      "host": "esp32-usb.local",
+      "port": 3240,
+      "bus_id": "1-1",
+      "auto_connect": true
+    }
+  ]
+}

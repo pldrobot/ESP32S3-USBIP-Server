@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>USB/IP Client</title>
+<style>
+:root {
+  --bg: #f3f4f6; --card: #fff; --border: #e5e7eb;
+  --text: #111827; --muted: #6b7280;
+  --blue: #2563eb; --blue-h: #1d4ed8;
+  --green: #16a34a; --red: #dc2626; --orange: #ea580c;
+  --warn-bg: #fef3c7; --warn-border: #f59e0b;
+  --radius: 8px; --shadow: 0 1px 3px rgba(0,0,0,.1);
+}
+@media(prefers-color-scheme:dark){
+  :root{--bg:#111827;--card:#1f2937;--border:#374151;
+        --text:#f9fafb;--muted:#9ca3af;
+        --warn-bg:#451a03;--warn-border:#d97706}
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:var(--bg);color:var(--text);min-height:100vh}
+
+header{background:var(--card);border-bottom:1px solid var(--border);
+       padding:14px 20px;display:flex;align-items:center;gap:12px;
+       position:sticky;top:0;z-index:10;box-shadow:var(--shadow)}
+header h1{font-size:18px;font-weight:600;flex:1}
+header span{font-size:22px}
+
+.main{max-width:860px;margin:0 auto;padding:20px 16px}
+
+/* Driver warning */
+#driver-warn{display:none;background:var(--warn-bg);border:1px solid var(--warn-border);
+             border-radius:var(--radius);padding:12px 16px;margin-bottom:16px;
+             display:flex;align-items:center;gap:10px;font-size:14px}
+#driver-warn a{color:var(--orange);font-weight:600;text-decoration:none}
+#driver-warn a:hover{text-decoration:underline}
+
+/* Toolbar */
+.toolbar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.btn{padding:8px 16px;border-radius:var(--radius);border:none;cursor:pointer;
+     font-size:14px;font-weight:500;transition:background .15s}
+.btn-primary{background:var(--blue);color:#fff}
+.btn-primary:hover{background:var(--blue-h)}
+.btn-secondary{background:var(--card);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{background:var(--border)}
+.btn-danger{background:#fee2e2;color:var(--red);border:1px solid #fca5a5}
+.btn-danger:hover{background:#fca5a5}
+.btn-sm{padding:5px 12px;font-size:13px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* Connection cards */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+      padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:12px;
+      box-shadow:var(--shadow)}
+.dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;transition:background .3s}
+.dot-ok{background:var(--green)}
+.dot-err{background:var(--orange)}
+.dot-off{background:#d1d5db}
+.dot-spin{background:var(--blue);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.card-info{flex:1;min-width:0}
+.card-name{font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-meta{font-size:12px;color:var(--muted);margin-top:2px}
+.card-err{font-size:12px;color:var(--orange);margin-top:2px}
+.card-actions{display:flex;gap:6px;flex-shrink:0}
+
+.empty{text-align:center;color:var(--muted);padding:48px 16px;font-size:15px}
+
+/* Add panel */
+#add-panel{display:none;background:var(--card);border:1px solid var(--border);
+           border-radius:var(--radius);padding:20px;margin-bottom:16px;
+           box-shadow:var(--shadow)}
+#add-panel h2{font-size:16px;font-weight:600;margin-bottom:16px}
+
+.tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:16px;gap:0}
+.tab{padding:8px 16px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent;
+     color:var(--muted);transition:all .15s;background:none;border-top:none;border-left:none;border-right:none}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue);font-weight:500}
+
+/* Scan results table */
+#scan-results{margin-top:12px}
+.scan-row{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);
+          gap:10px;font-size:14px}
+.scan-row:last-child{border-bottom:none}
+.scan-host{color:var(--muted);font-size:12px;min-width:140px}
+.scan-bus{font-family:monospace;min-width:50px}
+.scan-vid{font-family:monospace;color:var(--muted);min-width:90px}
+.scan-speed{min-width:50px}
+.scan-empty{color:var(--muted);padding:16px 0;font-size:14px;text-align:center}
+
+/* Form */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:500px){.form-grid{grid-template-columns:1fr}}
+.form-row{display:flex;flex-direction:column;gap:4px}
+.form-row label{font-size:13px;font-weight:500;color:var(--muted)}
+.form-row input{padding:8px 10px;border:1px solid var(--border);border-radius:6px;
+                font-size:14px;background:var(--bg);color:var(--text);outline:none}
+.form-row input:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+.form-actions{margin-top:14px;display:flex;justify-content:flex-end;gap:8px}
+
+#status-bar{font-size:13px;color:var(--muted);text-align:center;padding:8px}
+</style>
+</head>
+<body>
+
+<header>
+  <span>🔌</span>
+  <h1>USB/IP Client</h1>
+  <span id="conn-badge" style="font-size:13px;color:var(--muted)"></span>
+</header>
+
+<div class="main">
+
+  <!-- Driver warning (Windows: shown when usbip2_ude not installed) -->
+  <div id="driver-warn">
+    ⚠️ <strong>Driver not installed.</strong>
+    USB devices cannot be attached until <strong>usbip-win2</strong> is installed.
+    <a href="https://github.com/vadimgrn/usbip-win2/releases/latest" target="_blank">Download →</a>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="toggleAdd()">＋ Add Device</button>
+    <button class="btn btn-secondary" id="scan-btn" onclick="scanNetwork()">🔍 Scan Network</button>
+    <button class="btn btn-secondary" onclick="loadState()">↺ Refresh</button>
+  </div>
+
+  <!-- Add Device Panel -->
+  <div id="add-panel">
+    <h2>Add USB/IP Device</h2>
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('discover')">🔍 Discover</button>
+      <button class="tab" onclick="switchTab('manual')">✏️ Manual</button>
+    </div>
+
+    <!-- Discover tab -->
+    <div id="tab-discover">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input id="scan-host-input" class="form-row input" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:14px"
+               placeholder="Host or IP to scan (leave blank for auto-discover)">
+        <button class="btn btn-secondary btn-sm" onclick="scanSpecific()">Query</button>
+      </div>
+      <div id="scan-results">
+        <div class="scan-empty">Press "Scan Network" or enter a host above to discover devices.</div>
+      </div>
+    </div>
+
+    <!-- Manual tab -->
+    <div id="tab-manual" style="display:none">
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Host / IP *</label>
+          <input id="m-host" placeholder="192.168.1.10 or esp32-usb.local">
+        </div>
+        <div class="form-row">
+          <label>Port</label>
+          <input id="m-port" value="3240" type="number">
+        </div>
+        <div class="form-row">
+          <label>Bus ID *</label>
+          <input id="m-busid" placeholder="1-1">
+        </div>
+        <div class="form-row">
+          <label>Display Name</label>
+          <input id="m-name" placeholder="My USB Device">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" onclick="toggleAdd()">Cancel</button>
+        <button class="btn btn-primary" onclick="addManual()">Add Device</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connection list -->
+  <div id="conn-list"></div>
+  <div id="status-bar"></div>
+
+</div>
+
+<script>
+// ── State ───────────────────────────────────────────────────────────────────
+let state = { driver_installed: true, connections: [] };
+let scanResults = [];   // [{host, port, devices:[{bus_id,vendor_id,product_id,speed}]}]
+let addPanelOpen = false;
+let activeTab = 'discover';
+
+// ── SSE ─────────────────────────────────────────────────────────────────────
+const es = new EventSource('/events');
+es.onmessage = e => {
+  state = JSON.parse(e.data);
+  render();
+};
+es.onerror = () => setStatus('Connection to manager lost — refresh to reconnect.');
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function render() {
+  // Driver warning
+  const dw = document.getElementById('driver-warn');
+  dw.style.display = state.driver_installed ? 'none' : 'flex';
+
+  // Connection badge
+  const connected = (state.connections || []).filter(c => c.connected).length;
+  document.getElementById('conn-badge').textContent =
+    connected ? `${connected} connected` : '';
+
+  // Connection list
+  const list = document.getElementById('conn-list');
+  const conns = state.connections || [];
+  if (!conns.length) {
+    list.innerHTML = '<div class="empty">No devices configured.<br>Click <strong>＋ Add Device</strong> to get started.</div>';
+    return;
+  }
+  list.innerHTML = conns.map(c => `
+    <div class="card">
+      <div class="dot ${dotClass(c)}"></div>
+      <div class="card-info">
+        <div class="card-name">${esc(c.name)}</div>
+        <div class="card-meta">${esc(c.host)}  ·  bus ${esc(c.bus_id)}  ·  port ${c.port}</div>
+        ${c.error ? `<div class="card-err">⚠ ${esc(c.error)}</div>` : ''}
+      </div>
+      <div class="card-actions">
+        ${c.connected
+          ? `<button class="btn btn-danger btn-sm" onclick="doDisconnect('${esc(c.name)}')">Disconnect</button>`
+          : `<button class="btn btn-secondary btn-sm" onclick="doConnect('${esc(c.name)}')">
+               ${c.error ? 'Retry' : 'Connect'}
+             </button>`
+        }
+        <button class="btn btn-secondary btn-sm" style="color:var(--muted)"
+                onclick="doRemove('${esc(c.name)}')">✕</button>
+      </div>
+    </div>`).join('');
+}
+
+function dotClass(c) {
+  if (c.connected) return 'dot-ok';
+  if (c.error)     return 'dot-err';
+  return 'dot-off';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+// ── Actions ──────────────────────────────────────────────────────────────────
+function doConnect(name) {
+  setStatus(`Connecting to ${name}…`);
+  fetch('/api/connect?name=' + encodeURIComponent(name), {method:'POST'});
+}
+function doDisconnect(name) {
+  fetch('/api/disconnect?name=' + encodeURIComponent(name), {method:'POST'});
+}
+function doRemove(name) {
+  if (!confirm(`Remove "${name}" from the list?`)) return;
+  fetch('/api/remove?name=' + encodeURIComponent(name), {method:'POST'});
+}
+
+// ── Add panel ─────────────────────────────────────────────────────────────────
+function toggleAdd() {
+  addPanelOpen = !addPanelOpen;
+  document.getElementById('add-panel').style.display = addPanelOpen ? 'block' : 'none';
+  if (addPanelOpen && !scanResults.length) scanNetwork();
+}
+
+function switchTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.tab').forEach((t,i) =>
+    t.classList.toggle('active', (i===0 && name==='discover') || (i===1 && name==='manual')));
+  document.getElementById('tab-discover').style.display = name==='discover' ? '' : 'none';
+  document.getElementById('tab-manual').style.display   = name==='manual'   ? '' : 'none';
+}
+
+// ── Network scan ──────────────────────────────────────────────────────────────
+function scanNetwork() {
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true; btn.textContent = '⏳ Scanning…';
+  setStatus('Scanning local network for USB/IP servers…');
+  fetch('/api/scan').then(() => {
+    // State will be pushed via SSE when scan completes.
+    // Also poll discovered state after 3s as fallback.
+    setTimeout(() => { btn.disabled=false; btn.textContent='🔍 Scan Network'; }, 4000);
+    setTimeout(loadDiscovered, 3000);
+  });
+}
+
+function scanSpecific() {
+  const host = document.getElementById('scan-host-input').value.trim();
+  if (!host) { scanNetwork(); return; }
+  setStatus(`Querying ${host}…`);
+  fetch(`/api/scan-host?host=${encodeURIComponent(host)}&port=3240`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { setStatus('Error: ' + data.error); return; }
+      mergeScanResult(data);
+      renderScanResults();
+      setStatus(`Found ${(data.devices||[]).length} device(s) on ${host}.`);
+    })
+    .catch(e => setStatus('Query failed: ' + e));
+}
+
+function loadDiscovered() {
+  // Reload full state which includes discovered via SSE
+  loadState();
+}
+
+function mergeScanResult(result) {
+  const key = result.host + ':' + result.port;
+  const idx = scanResults.findIndex(r => r.host+':'+r.port === key);
+  if (idx >= 0) scanResults[idx] = result;
+  else scanResults.push(result);
+}
+
+function renderScanResults() {
+  const el = document.getElementById('scan-results');
+  if (!scanResults.length) {
+    el.innerHTML = '<div class="scan-empty">No devices found yet.</div>';
+    return;
+  }
+  let html = '';
+  for (const srv of scanResults) {
+    if (!srv.devices || !srv.devices.length) continue;
+    for (const dev of srv.devices) {
+      const alreadyAdded = (state.connections||[]).some(
+        c => c.host===srv.host && c.bus_id===dev.bus_id);
+      html += `<div class="scan-row">
+        <span class="scan-host">${esc(srv.host)}:${srv.port}</span>
+        <span class="scan-bus">${esc(dev.bus_id)}</span>
+        <span class="scan-vid">${pad4(dev.vendor_id)}:${pad4(dev.product_id)}</span>
+        <span class="scan-speed">${esc(dev.speed)}</span>
+        <span style="flex:1"></span>
+        ${alreadyAdded
+          ? '<span style="font-size:12px;color:var(--muted)">Added ✓</span>'
+          : `<button class="btn btn-primary btn-sm"
+               onclick="addDiscovered('${esc(srv.host)}',${srv.port},'${esc(dev.bus_id)}')">Add</button>`}
+      </div>`;
+    }
+  }
+  el.innerHTML = html || '<div class="scan-empty">No devices found yet.</div>';
+}
+
+function pad4(n) { return n.toString(16).toUpperCase().padStart(4,'0'); }
+
+function addDiscovered(host, port, busID) {
+  const name = prompt(`Display name for ${host} [${busID}]:`, `${host} [${busID}]`);
+  if (name === null) return;
+  addConn({ name: name||`${host} [${busID}]`, host, port, bus_id: busID });
+}
+
+function addManual() {
+  const host  = document.getElementById('m-host').value.trim();
+  const busID = document.getElementById('m-busid').value.trim();
+  const port  = parseInt(document.getElementById('m-port').value) || 3240;
+  const name  = document.getElementById('m-name').value.trim() || `${host} [${busID}]`;
+  if (!host || !busID) { alert('Host and Bus ID are required.'); return; }
+  addConn({ name, host, port, bus_id: busID });
+}
+
+function addConn(c) {
+  fetch('/api/add', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(c)
+  }).then(r => r.json()).then(d => {
+    if (d.error) { alert('Error: ' + d.error); return; }
+    setStatus(`'${c.name}' added.`);
+    if (activeTab === 'manual') {
+      ['m-host','m-busid','m-name'].forEach(id => document.getElementById(id).value='');
+    }
+    renderScanResults(); // refresh "Added ✓" badges
+  });
+}
+
+function loadState() {
+  fetch('/api/state').then(r=>r.json()).then(s=>{state=s;render();});
+}
+
+// Initial load
+loadState();
+</script>
+</body>
+</html>
