@@ -61,6 +61,11 @@ if not cfg:
     with open(HEADER_PATH, "w") as f:
         f.write('#pragma once\n#error ".env not found — copy .env.template to .env"\n')
 else:
+    # Per-environment LED pin override (e.g. custom_led_pin = 48 for the Super Mini)
+    led = env.GetProjectOption("custom_led_pin", "")
+    if led:
+        cfg["LED_PIN"] = (str(led), False)
+        print("[load_env] LED_PIN overridden by environment -> {}".format(led))
     write_header(cfg)
 
     # For the OTA environment: inject upload_port, monitor_port, and --auth from .env

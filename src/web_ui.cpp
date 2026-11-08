@@ -5,12 +5,17 @@ WebUI::WebUI(WiFiManager& wifi, UsbDevice& device, UsbIpServer& usbip)
     : _server(WEB_SERVER_PORT), _wifi(wifi), _device(device), _usbip(usbip) {}
 
 void WebUI::begin() {
+    static const char* hdrs[] = {"Cookie"};
+    _server.collectHeaders(hdrs, 1);
+
     _server.on("/",                  HTTP_GET,  [this](){ _handleRoot(); });
-    _server.on("/api/status",        HTTP_GET,  [this](){ _handleStatus(); });
-    _server.on("/api/usbip/kick",    HTTP_POST, [this](){ _handleUsbIpKick(); });
-    _server.on("/api/wifi/scan",     HTTP_GET,  [this](){ _handleWifiScan(); });
-    _server.on("/api/wifi/connect",  HTTP_POST, [this](){ _handleWifiConnect(); });
-    _server.on("/api/restart",       HTTP_POST, [this](){ _handleRestart(); });
+    _server.on("/login",             HTTP_POST, [this](){ _handleLogin(); });
+    _server.on("/api/logout",        HTTP_POST, [this](){ _handleLogout(); });
+    _server.on("/api/status",        HTTP_GET,  [this](){ if (_requireAuth()) _handleStatus(); });
+    _server.on("/api/usbip/kick",    HTTP_POST, [this](){ if (_requireAuth()) _handleUsbIpKick(); });
+    _server.on("/api/wifi/scan",     HTTP_GET,  [this](){ if (_requireAuth()) _handleWifiScan(); });
+    _server.on("/api/wifi/connect",  HTTP_POST, [this](){ if (_requireAuth()) _handleWifiConnect(); });
+    _server.on("/api/restart",       HTTP_POST, [this](){ if (_requireAuth()) _handleRestart(); });
     _server.onNotFound([this](){ _handleNotFound(); });
     _server.begin();
     debugI("Web Dashboard on port %d", WEB_SERVER_PORT);
@@ -18,8 +23,95 @@ void WebUI::begin() {
 
 void WebUI::task() { _server.handleClient(); }
 
-void WebUI::_handleRoot()     { _server.send(200, "text/html", _generatePage()); }
+void WebUI::_handleRoot() {
+    _server.sendHeader("Cache-Control", "no-store");
+    _server.send(200, "text/html", _authed() ? _generatePage() : _loginPage(false));
+}
 void WebUI::_handleWifiScan() { _server.send(200, "application/json", _wifi.scanNetworks()); }
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+String WebUI::_cookieToken() {
+    String c = _server.header("Cookie");
+    int i = c.indexOf("sid=");
+    if (i < 0) return "";
+    int e = c.indexOf(';', i);
+    return c.substring(i + 4, e < 0 ? c.length() : e);
+}
+
+bool WebUI::_authed() {
+    String t = _cookieToken();
+    if (t.length() != 32) return false;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (_tokens[i].length() == 32 && _tokens[i] == t) return true;
+    return false;
+}
+
+bool WebUI::_requireAuth() {
+    if (_authed()) return true;
+    _server.send(401, "application/json", "{\"error\":\"login required\"}");
+    return false;
+}
+
+String WebUI::_newToken() {
+    char buf[33];
+    for (int i = 0; i < 4; i++) snprintf(buf + i * 8, 9, "%08x", (unsigned)esp_random());
+    return String(buf);
+}
+
+void WebUI::_dropToken(const String& t) {
+    if (t.length() != 32) return;
+    for (int i = 0; i < MAX_SESSIONS; i++) if (_tokens[i] == t) _tokens[i] = "";
+}
+
+static bool ctEq(const String& a, const char* b) {
+    size_t n = strlen(b);
+    if (a.length() != n) return false;
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= (uint8_t)a[i] ^ (uint8_t)b[i];
+    return d == 0;
+}
+
+void WebUI::_handleLogin() {
+    bool ok = ctEq(_server.arg("user"), WEB_USER) & ctEq(_server.arg("password"), WEB_PASSWORD);
+    if (!ok) {
+        debugW("Web login failed from %s", _server.client().remoteIP().toString().c_str());
+        delay(1000);  // slow down brute force
+        _server.send(401, "text/html", _loginPage(true));
+        return;
+    }
+    String t = _newToken();
+    _tokens[_tokenNext] = t;                       // oldest session is evicted
+    _tokenNext = (_tokenNext + 1) % MAX_SESSIONS;
+    _server.sendHeader("Set-Cookie", "sid=" + t + "; Path=/; HttpOnly; SameSite=Strict");
+    _server.sendHeader("Location", "/");
+    _server.send(303, "text/plain", "");
+}
+
+void WebUI::_handleLogout() {
+    _dropToken(_cookieToken());
+    _server.sendHeader("Set-Cookie", "sid=; Path=/; Max-Age=0");
+    _server.send(200, "application/json", "{\"ok\":true}");
+}
+
+String WebUI::_loginPage(bool failed) {
+    String p = R"rawliteral(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+form{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:24px;width:min(340px,92vw)}
+h1{font-size:1.2rem;margin-bottom:16px}
+input{width:100%;padding:9px 11px;margin-bottom:10px;background:#0f172a;border:1px solid #475569;border-radius:7px;color:#e2e8f0;font-size:.9rem}
+input:focus{outline:none;border-color:#3b82f6}
+button{width:100%;padding:9px;border:none;border-radius:7px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+.err{color:#fca5a5;font-size:.82rem;margin-bottom:10px}</style></head><body>
+<form method="POST" action="/login"><h1>USB/IP Server Login</h1>)rawliteral";
+    if (failed) p += "<div class=\"err\">Invalid username or password</div>";
+    p += R"rawliteral(<input name="user" placeholder="Username" autocomplete="username" autofocus>
+<input name="password" type="password" placeholder="Password" autocomplete="current-password">
+<button type="submit">Sign in</button></form></body></html>)rawliteral";
+    return p;
+}
+
 void WebUI::_handleNotFound() { _server.send(404, "text/plain", "Not Found"); }
 
 void WebUI::_handleStatus() {
@@ -32,8 +124,8 @@ void WebUI::_handleStatus() {
        + ",\"rssi\":"     + String(_wifi.getRSSI())
        + ",\"mode\":\""   + (_wifi.getMode() == WSTATE_STATION ? "station" : "ap") + "\"},";
 
-    // Printer
-    j += "\"printer\":{\"connected\":" + String(_device.isConnected() ? "true" : "false")
+    // USB device
+    j += "\"usbdev\":{\"connected\":" + String(_device.isConnected() ? "true" : "false")
        + ",\"ready\":"    + (_device.isReady()   ? "true" : "false")
        + ",\"product\":\"" + _device.getProduct() + "\""
        + ",\"vid\":\"0x"  + String(_device.getVendorId(),  HEX) + "\""
@@ -73,13 +165,13 @@ void WebUI::_handleRestart() {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 String WebUI::_generatePage() {
-    return R"rawliteral(
+    String p = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>USB/IP Bridge</title>
+<title>%DEVNAME%</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
@@ -124,9 +216,9 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 </head>
 <body>
 <div class="wrap">
-<h1>USB/IP Bridge</h1>
+<div style="display:flex;justify-content:space-between;align-items:center"><h1>%DEVNAME%</h1><button class="btn bs" onclick="logout()">Logout</button></div>
 
-<!-- ── Printer (USB) ─────────────────────────────────────────────────── -->
+<!-- ── USB device ─────────────────────────────────────────────────── -->
 <div class="card">
 <h2>USB Device</h2>
 <div class="row"><span class="lbl">Connection</span><span id="p-conn" class="badge r">Disconnected</span></div>
@@ -186,7 +278,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 </div>
 </div>
 
-<div class="foot">USB/IP Bridge · ESP32-S3</div>
+<div class="foot">%DEVNAME% · USB/IP Server · ESP32-S3</div>
 </div>
 
 <script>
@@ -206,16 +298,16 @@ function ago(s) {
 }
 
 function updateStatus() {
-  fetch('/api/status').then(r => r.json()).then(d => {
+  fetch('/api/status').then(r => { if (r.status === 401) { location.reload(); throw 0; } return r.json(); }).then(d => {
 
-    // Printer
+    // USB device
     var pc = document.getElementById('p-conn');
-    if (d.printer.ready)       { pc.textContent='Ready';       pc.className='badge g'; }
-    else if(d.printer.connected){ pc.textContent='Connected';  pc.className='badge y'; }
+    if (d.usbdev.ready)       { pc.textContent='Ready';       pc.className='badge g'; }
+    else if(d.usbdev.connected){ pc.textContent='Connected';  pc.className='badge y'; }
     else                        { pc.textContent='Disconnected';pc.className='badge r'; }
-    document.getElementById('p-model').textContent = d.printer.product || '—';
-    document.getElementById('p-ids').textContent   = d.printer.connected
-      ? d.printer.vid + ':' + d.printer.pid : '—';
+    document.getElementById('p-model').textContent = d.usbdev.product || '—';
+    document.getElementById('p-ids').textContent   = d.usbdev.connected
+      ? d.usbdev.vid + ':' + d.usbdev.pid : '—';
 
     // WiFi
     serverIP = d.wifi.ip || '';
@@ -250,7 +342,7 @@ function updateStatus() {
         + '<div class="session-ip">' + u.client.ip + '</div>'
         + '</div>';
     } else {
-      sess.innerHTML = '<div class="no-client">No client attached — new connection auto-takes over</div>';
+      sess.innerHTML = '<div class="no-client">No client attached — only one client may connect at a time</div>';
     }
 
     // USB/IP history
@@ -282,6 +374,10 @@ function kickClient() {
   if (!confirm('Disconnect the current USB/IP client?')) return;
   fetch('/api/usbip/kick', {method:'POST'})
     .then(function(){ updateStatus(); });
+}
+
+function logout() {
+  fetch('/api/logout', {method:'POST'}).then(function(){ location.reload(); });
 }
 
 function copyCmd() {
@@ -332,4 +428,6 @@ setInterval(updateStatus, 2000);
 </body>
 </html>
 )rawliteral";
+    p.replace("%DEVNAME%", DEVICE_NAME);
+    return p;
 }
