@@ -49,6 +49,7 @@ Edit `.env` with your values (see comments inside). Key fields:
 | `MDNS_HOSTNAME` | mDNS hostname (device appears as `<hostname>.lan`) |
 | `DEVICE_NAME` | Label shown in logs and the web dashboard |
 | `OTA_HOSTNAME` | Hostname used for OTA uploads (usually same as `MDNS_HOSTNAME`) |
+| `OTA_IP` | Optional device IP used as the OTA upload target (overrides `OTA_HOSTNAME`; avoids mDNS problems) |
 | `OTA_PASSWORD` | Password required to accept OTA firmware updates |
 | `LED_PIN` | GPIO number of the status LED |
 | `NVS_NAMESPACE` | Flash namespace for storing WiFi credentials |
@@ -128,11 +129,8 @@ password from `.env` automatically:
 pio run -e esp32s3_ota -t upload
 ```
 
-For the Telnet debug monitor:
-
-```bash
-pio run -e esp32s3_ota -t monitor
-```
+Logs (including the log from before a crash/reboot) are on the web dashboard
+— see the **Logs** card.
 
 ## Services
 
@@ -140,7 +138,6 @@ pio run -e esp32s3_ota -t monitor
 |------|----------|---------|
 | 3240 | TCP | USB/IP bridge |
 | 80 | HTTP | Web dashboard (status + WiFi config) |
-| 23 | Telnet | Live debug output (RemoteDebug) |
 | 3232 | TCP | OTA firmware upload (ArduinoOTA) |
 
 ## LED status
@@ -163,7 +160,8 @@ pio run -e esp32s3_ota -t monitor
 │   ├── usbip_server.h/.cpp — USB/IP protocol bridge (port 3240)
 │   ├── wifi_manager.h/.cpp — AP/Station WiFi with NVS credential storage
 │   ├── web_ui.h/.cpp     — HTTP dashboard + REST API (port 80)
-│   └── rdebug.h          — RemoteDebug Telnet wrapper (port 23)
+│   ├── applog.h          — debugI/W/E macros → Serial + persistent log
+│   └── persist_log.h/.cpp — crash-surviving log (RTC ring + LittleFS)
 ├── tools/
 │   └── load_env.py       — PlatformIO pre-build script; reads .env → config_env.h
 ├── .env                  — Your local config (gitignored — never commit)

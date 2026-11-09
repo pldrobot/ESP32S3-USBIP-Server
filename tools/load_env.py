@@ -70,12 +70,12 @@ else:
 
     # For the OTA environment: inject upload_port, monitor_port, and --auth from .env
     if env.subst("$PIOENV").endswith("_ota"):
-        host = cfg["OTA_HOSTNAME"][0] if "OTA_HOSTNAME" in cfg else ""
+        # OTA_IP (if set) wins over the mDNS hostname as the upload target.
+        ip   = cfg["OTA_IP"][0].strip() if "OTA_IP" in cfg else ""
+        host = ip or (cfg["OTA_HOSTNAME"][0] if "OTA_HOSTNAME" in cfg else "")
         if host:
             env.Replace(UPLOAD_PORT=host)
-            env.Replace(MONITOR_PORT="socket://{}:23".format(host))
             print("[load_env] OTA upload_port  → {}".format(host))
-            print("[load_env] OTA monitor_port → socket://{}:23".format(host))
         if "OTA_PASSWORD" in cfg:
             # Must go into UPLOAD_FLAGS, not UPLOADERFLAGS.
             # The espota command is: $UPLOADERFLAGS --file $SOURCE $UPLOAD_FLAGS

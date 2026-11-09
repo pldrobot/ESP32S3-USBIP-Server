@@ -7,3 +7,6 @@
 # Local config — never commit
 .env
 src/config_env.h
+
+# Local helper scripts
+upload.ps1

@@ -1,5 +1,5 @@
 #include "wifi_manager.h"
-#include "rdebug.h"
+#include "applog.h"
 
 WiFiManager::WiFiManager() : _mode(WSTATE_NONE), _lastReconnect(0) {}
 

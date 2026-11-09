@@ -11,17 +11,19 @@
 //  Ports:
 //    3240 — USB/IP
 //    80   — Web UI  (WiFi setup + status dashboard)
-//    23   — Telnet  (RemoteDebug — live debug output)
+//  Logs: crash-surviving, viewable on the web dashboard (Logs card)
 // =============================================================
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 
 #include <EspUsbIpServer.h>
 
 #include "config.h"
-#include "rdebug.h"
+#include "applog.h"
+#include "persist_log.h"
 #include "wifi_manager.h"
 #include "web_ui.h"
 
@@ -38,8 +40,6 @@ static void setLed(bool on) {
 }
 
 // ── Global objects ────────────────────────────────────────────────────────────
-RemoteDebug Debug;
-
 UsbDevice   usbDevice;
 WiFiManager wifiMgr;
 UsbIpServer usbip;
@@ -60,13 +60,17 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    PersistLog::begin();   // first: captures reset reason, saves previous boot's log
+
     Serial.println();
     Serial.println("===========================================");
     Serial.println("  " DEVICE_NAME " — USB/IP Server");
     Serial.println("  Firmware: " __DATE__ "  " __TIME__);
     Serial.println("===========================================");
-    Serial.printf("  Heap: %dKB   PSRAM: %dKB\n\n",
+    Serial.printf("  Heap: %dKB   PSRAM: %dKB\n",
                   ESP.getFreeHeap()/1024, ESP.getFreePsram()/1024);
+    // Why did we (re)boot? 3=SW 4=PANIC 5=INT_WDT 6=TASK_WDT 7=WDT 9=BROWNOUT
+    Serial.printf("  Reset reason: %d\n\n", (int)esp_reset_reason());
 
 #ifndef LED_RGB
     pinMode(LED_PIN, OUTPUT);
@@ -79,11 +83,6 @@ void setup() {
     // 2 — WiFi
     wifiMgr.begin();
 
-    // 3 — RemoteDebug (Telnet port 23)
-    Debug.begin(MDNS_HOSTNAME);
-    Debug.setResetCmdEnabled(true);
-    Debug.setSerialEnabled(true);
-    debugI("RemoteDebug on telnet %s.local:23", MDNS_HOSTNAME);
 
     if (wifiMgr.isConnected()) setupOTA();
 
@@ -95,6 +94,7 @@ void setup() {
     });
     usbip.onClientDisconnect([](const char* ip, uint32_t sec) {
         debugI("Device released by %s after %us", ip, sec);
+        PersistLog::flushNow();   // keep the log of the job that just finished
     });
 
     // 5 — Web dashboard (port 80)
@@ -108,7 +108,6 @@ void setup() {
         debugI("IP:        %s",        wifiMgr.getIP().c_str());
         debugI("Dashboard: http://%s", wifiMgr.getIP().c_str());
         debugI("Attach:    usbip attach -r %s -b 1-1", wifiMgr.getIP().c_str());
-        debugI("Debug:     telnet %s:23", wifiMgr.getIP().c_str());
     } else {
         debugW("No WiFi — connect to AP '%s', open http://192.168.4.1", AP_SSID);
     }
@@ -122,7 +121,7 @@ void loop() {
 
     wifiMgr.task();
     webUI.task();
-    Debug.handle();
+    PersistLog::task();
 
     static bool otaUp = false;
     if (wifiMgr.isConnected()) {

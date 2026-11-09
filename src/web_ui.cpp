@@ -1,5 +1,6 @@
 #include "web_ui.h"
-#include "rdebug.h"
+#include "applog.h"
+#include "persist_log.h"
 
 WebUI::WebUI(WiFiManager& wifi, UsbDevice& device, UsbIpServer& usbip)
     : _server(WEB_SERVER_PORT), _wifi(wifi), _device(device), _usbip(usbip) {}
@@ -15,6 +16,7 @@ void WebUI::begin() {
     _server.on("/api/usbip/kick",    HTTP_POST, [this](){ if (_requireAuth()) _handleUsbIpKick(); });
     _server.on("/api/wifi/scan",     HTTP_GET,  [this](){ if (_requireAuth()) _handleWifiScan(); });
     _server.on("/api/wifi/connect",  HTTP_POST, [this](){ if (_requireAuth()) _handleWifiConnect(); });
+    _server.on("/api/logs",          HTTP_GET,  [this](){ if (_requireAuth()) _server.send(200, "text/plain; charset=utf-8", PersistLog::dump()); });
     _server.on("/api/restart",       HTTP_POST, [this](){ if (_requireAuth()) _handleRestart(); });
     _server.onNotFound([this](){ _handleNotFound(); });
     _server.begin();
@@ -278,6 +280,16 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 </div>
 </div>
 
+<!-- ── Logs ─────────────────────────────────────────────────────────── -->
+<div class="card">
+<h2>Logs</h2>
+<div class="brow" style="margin-top:0;margin-bottom:8px">
+  <button class="btn bp" onclick="loadLogs()">Load / Refresh</button>
+  <button class="btn bs" onclick="copyLogs()">Copy</button>
+</div>
+<pre id="logbox" style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px;font-size:.7rem;color:#cbd5e1;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-all">Press Load to view (current boot + previous boots, survives crashes).</pre>
+</div>
+
 <div class="foot">%DEVNAME% · USB/IP Server · ESP32-S3</div>
 </div>
 
@@ -368,6 +380,16 @@ function updateStatus() {
     document.getElementById('s-psram').textContent = (d.sys.psram/1024).toFixed(0)+' KB';
 
   }).catch(function(){});
+}
+
+function loadLogs() {
+  var b = document.getElementById('logbox');
+  b.textContent = 'Loading...';
+  fetch('/api/logs').then(function(r){ if (r.status===401){location.reload();throw 0;} return r.text(); })
+    .then(function(t){ b.textContent = t; b.scrollTop = 0; }).catch(function(){});
+}
+function copyLogs() {
+  navigator.clipboard.writeText(document.getElementById('logbox').textContent);
 }
 
 function kickClient() {
