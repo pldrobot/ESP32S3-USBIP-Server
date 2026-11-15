@@ -3,54 +3,87 @@
 #include "persist_log.h"
 
 WebUI::WebUI(WiFiManager& wifi, UsbDevice& device, UsbIpServer& usbip)
-    : _server(WEB_SERVER_PORT), _wifi(wifi), _device(device), _usbip(usbip) {}
+    : _server(WEB_SERVER_PORT), _ws("/ws"), _wifi(wifi), _device(device), _usbip(usbip) {}
 
 void WebUI::begin() {
-    static const char* hdrs[] = {"Cookie"};
-    _server.collectHeaders(hdrs, 1);
+    _server.on("/",                  HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r); });
+    _server.on("/login",             HTTP_POST, [this](AsyncWebServerRequest* r){ _handleLogin(r); });
+    _server.on("/api/logout",        HTTP_POST, [this](AsyncWebServerRequest* r){ _handleLogout(r); });
+    _server.on("/api/usbip/kick",    HTTP_POST, [this](AsyncWebServerRequest* r){ if (_requireAuth(r)) _handleUsbIpKick(r); });
+    _server.on("/api/wifi/scan",     HTTP_GET,  [this](AsyncWebServerRequest* r){ if (_requireAuth(r)) _handleWifiScan(r); });
+    _server.on("/api/wifi/connect",  HTTP_POST, [this](AsyncWebServerRequest* r){ if (_requireAuth(r)) _handleWifiConnect(r); });
+    _server.on("/api/wifi/result",   HTTP_GET,  [this](AsyncWebServerRequest* r){ if (_requireAuth(r)) _handleWifiResult(r); });
+    _server.on("/api/logs",          HTTP_GET,  [this](AsyncWebServerRequest* r){
+        if (_requireAuth(r)) r->send(200, "text/plain; charset=utf-8", PersistLog::dump());
+    });
+    _server.on("/api/restart",       HTTP_POST, [this](AsyncWebServerRequest* r){ if (_requireAuth(r)) _handleRestart(r); });
 
-    _server.on("/",                  HTTP_GET,  [this](){ _handleRoot(); });
-    _server.on("/login",             HTTP_POST, [this](){ _handleLogin(); });
-    _server.on("/api/logout",        HTTP_POST, [this](){ _handleLogout(); });
-    _server.on("/api/status",        HTTP_GET,  [this](){ if (_requireAuth()) _handleStatus(); });
-    _server.on("/api/usbip/kick",    HTTP_POST, [this](){ if (_requireAuth()) _handleUsbIpKick(); });
-    _server.on("/api/wifi/scan",     HTTP_GET,  [this](){ if (_requireAuth()) _handleWifiScan(); });
-    _server.on("/api/wifi/connect",  HTTP_POST, [this](){ if (_requireAuth()) _handleWifiConnect(); });
-    _server.on("/api/logs",          HTTP_GET,  [this](){ if (_requireAuth()) _server.send(200, "text/plain; charset=utf-8", PersistLog::dump()); });
-    _server.on("/api/restart",       HTTP_POST, [this](){ if (_requireAuth()) _handleRestart(); });
-    _server.onNotFound([this](){ _handleNotFound(); });
+    // Live status. Handlers that fail the filter are skipped, so an upgrade request without the
+    // login cookie falls through to the 404 below.
+    _ws.setFilter([this](AsyncWebServerRequest* r){ return _authedReq(r); });
+    _ws.onEvent([this](AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType type, void*, uint8_t*, size_t) {
+        if (type == WS_EVT_CONNECT) {
+            debugI("Status WebSocket #%u connected", (unsigned)c->id());
+            c->text(_statusJson());                // first frame right away, no wait for the next tick
+        } else if (type == WS_EVT_DISCONNECT) {
+            debugI("Status WebSocket #%u closed", (unsigned)c->id());
+        }
+    });
+    _server.addHandler(&_ws);
+
+    _server.onNotFound([](AsyncWebServerRequest* r){
+        if (r->url() == "/ws") debugW("Status WebSocket refused (not logged in) - reload the dashboard page");
+        r->send(404, "text/plain", "Not Found");
+    });
     _server.begin();
-    debugI("Web Dashboard on port %d", WEB_SERVER_PORT);
+    debugI("Web Dashboard on port %d (status WebSocket at /ws)", WEB_SERVER_PORT);
 }
 
-void WebUI::task() { _server.handleClient(); }
+void WebUI::task() {
+    // Push the status once a second to whoever has the dashboard open.
+    if (millis() - _lastPush >= 1000) {
+        _lastPush = millis();
+        _ws.cleanupClients();                      // drop dead sockets
+        if (_ws.count() > 0) _ws.textAll(_statusJson());
+    }
 
-void WebUI::_handleRoot() {
-    _server.sendHeader("Cache-Control", "no-store");
-    _server.send(200, "text/html", _authed() ? _generatePage() : _loginPage(false));
+    // Joining WiFi takes seconds: done here, not on the AsyncTCP task.
+    if (_connState == CONN_PENDING) {
+        _connState = CONN_RUNNING;
+        bool ok = _wifi.setCredentials(_connSsid, _connPass);
+        _connIp   = _wifi.getIP();
+        _connPass = "";
+        _connState = ok ? CONN_OK : CONN_FAILED;
+    }
+    if (_restartAt && (long)(millis() - _restartAt) >= 0) ESP.restart();
 }
-void WebUI::_handleWifiScan() { _server.send(200, "application/json", _wifi.scanNetworks()); }
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-String WebUI::_cookieToken() {
-    String c = _server.header("Cookie");
+String WebUI::_arg(AsyncWebServerRequest* r, const char* name) {
+    return r->hasParam(name, true) ? r->getParam(name, true)->value() : String();
+}
+
+String WebUI::_cookieToken(AsyncWebServerRequest* r) {
+    if (!r->hasHeader("Cookie")) return "";
+    String c = r->header("Cookie");
     int i = c.indexOf("sid=");
     if (i < 0) return "";
     int e = c.indexOf(';', i);
     return c.substring(i + 4, e < 0 ? c.length() : e);
 }
 
-bool WebUI::_authed() {
-    String t = _cookieToken();
+bool WebUI::_authedReq(AsyncWebServerRequest* r) {
+    String t = _cookieToken(r);
     if (t.length() != 32) return false;
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (_tokens[i].length() == 32 && _tokens[i] == t) return true;
     return false;
 }
 
-bool WebUI::_requireAuth() {
-    if (_authed()) return true;
-    _server.send(401, "application/json", "{\"error\":\"login required\"}");
+bool WebUI::_requireAuth(AsyncWebServerRequest* r) {
+    if (_authedReq(r)) return true;
+    r->send(401, "application/json", "{\"error\":\"login required\"}");
     return false;
 }
 
@@ -73,26 +106,98 @@ static bool ctEq(const String& a, const char* b) {
     return d == 0;
 }
 
-void WebUI::_handleLogin() {
-    bool ok = ctEq(_server.arg("user"), WEB_USER) & ctEq(_server.arg("password"), WEB_PASSWORD);
-    if (!ok) {
-        debugW("Web login failed from %s", _server.client().remoteIP().toString().c_str());
-        delay(1000);  // slow down brute force
-        _server.send(401, "text/html", _loginPage(true));
+// Device-supplied text (USB product string) must not break the status JSON.
+static String jsonEsc(String s) {
+    s.replace("\\", "\\\\");
+    s.replace("\"", "\\\"");
+    for (unsigned i = 0; i < s.length(); i++)
+        if ((uint8_t)s[i] < 0x20) s.setCharAt(i, ' ');
+    return s;
+}
+
+// ── Handlers (AsyncTCP task: never block) ─────────────────────────────────────
+
+void WebUI::_handleRoot(AsyncWebServerRequest* r) {
+    AsyncWebServerResponse* res =
+        r->beginResponse(200, "text/html", _authedReq(r) ? _generatePage() : _loginPage(false));
+    res->addHeader("Cache-Control", "no-store");
+    r->send(res);
+}
+
+void WebUI::_handleLogin(AsyncWebServerRequest* r) {
+    // Throttle guessing without blocking: attempts within 1 s of a failure are refused.
+    if (_lastLoginFailMs && millis() - _lastLoginFailMs < 1000) {
+        r->send(429, "text/html", _loginPage(true));
         return;
     }
+    bool ok = ctEq(_arg(r, "user"), WEB_USER) & ctEq(_arg(r, "password"), WEB_PASSWORD);
+    if (!ok) {
+        debugW("Web login failed from %s", r->client()->remoteIP().toString().c_str());
+        _lastLoginFailMs = millis();
+        r->send(401, "text/html", _loginPage(true));
+        return;
+    }
+    _lastLoginFailMs = 0;
     String t = _newToken();
     _tokens[_tokenNext] = t;                       // oldest session is evicted
     _tokenNext = (_tokenNext + 1) % MAX_SESSIONS;
-    _server.sendHeader("Set-Cookie", "sid=" + t + "; Path=/; HttpOnly; SameSite=Strict");
-    _server.sendHeader("Location", "/");
-    _server.send(303, "text/plain", "");
+    AsyncWebServerResponse* res = r->beginResponse(303, "text/plain", "");
+    res->addHeader("Set-Cookie", "sid=" + t + "; Path=/; HttpOnly; SameSite=Strict");
+    res->addHeader("Location", "/");
+    r->send(res);
 }
 
-void WebUI::_handleLogout() {
-    _dropToken(_cookieToken());
-    _server.sendHeader("Set-Cookie", "sid=; Path=/; Max-Age=0");
-    _server.send(200, "application/json", "{\"ok\":true}");
+void WebUI::_handleLogout(AsyncWebServerRequest* r) {
+    _dropToken(_cookieToken(r));
+    AsyncWebServerResponse* res = r->beginResponse(200, "application/json", "{\"ok\":true}");
+    res->addHeader("Set-Cookie", "sid=; Path=/; Max-Age=0");
+    r->send(res);
+}
+
+void WebUI::_handleUsbIpKick(AsyncWebServerRequest* r) {
+    _usbip.kickClient();
+    r->send(200, "application/json", "{\"ok\":true}");
+}
+
+// A scan takes seconds. First call starts one and answers 202; the page asks again until
+// the results are in.
+void WebUI::_handleWifiScan(AsyncWebServerRequest* r) {
+    String json;
+    if (_wifi.scanPoll(json)) r->send(200, "application/json", json);
+    else                      r->send(202, "application/json", "{\"scanning\":true}");
+}
+
+// Joining takes up to ~15 s and drops the setup AP: accept the request here, join in task(),
+// and let the page poll /api/wifi/result.
+void WebUI::_handleWifiConnect(AsyncWebServerRequest* r) {
+    String ssid = _arg(r, "ssid");
+    String pass = _arg(r, "password");
+    if (!ssid.length()) { r->send(400, "application/json", "{\"error\":\"SSID required\"}"); return; }
+    if (_connState == CONN_PENDING || _connState == CONN_RUNNING) {
+        r->send(409, "application/json", "{\"error\":\"already connecting\"}");
+        return;
+    }
+    _connSsid = ssid; _connPass = pass; _connIp = "";
+    __sync_synchronize();                          // strings are written before the state flips
+    _connState = CONN_PENDING;
+    r->send(202, "application/json", "{\"accepted\":true}");
+}
+
+void WebUI::_handleWifiResult(AsyncWebServerRequest* r) {
+    const char* st = "idle";
+    switch (_connState) {
+        case CONN_PENDING: case CONN_RUNNING: st = "connecting"; break;
+        case CONN_OK:      st = "ok";         break;
+        case CONN_FAILED:  st = "failed";     break;
+        default: break;
+    }
+    r->send(200, "application/json", String("{\"state\":\"") + st + "\",\"ip\":\"" + _connIp + "\"}");
+}
+
+void WebUI::_handleRestart(AsyncWebServerRequest* r) {
+    r->send(200, "application/json", "{\"ok\":true}");
+    _restartAt = millis() + 300;                   // task() restarts after the reply is out
+    if (!_restartAt) _restartAt = 1;
 }
 
 String WebUI::_loginPage(bool failed) {
@@ -118,9 +223,7 @@ button{width:100%;padding:9px;border:none;border-radius:7px;background:#3b82f6;c
     return p;
 }
 
-void WebUI::_handleNotFound() { _server.send(404, "text/plain", "Not Found"); }
-
-void WebUI::_handleStatus() {
+String WebUI::_statusJson() {
     String j = "{";
 
     // WiFi
@@ -133,7 +236,7 @@ void WebUI::_handleStatus() {
     // USB device
     j += "\"usbdev\":{\"connected\":" + String(_device.isConnected() ? "true" : "false")
        + ",\"ready\":"    + (_device.isReady()   ? "true" : "false")
-       + ",\"product\":\"" + _device.getProduct() + "\""
+       + ",\"product\":\"" + jsonEsc(_device.getProduct()) + "\""
        + ",\"vid\":\"0x"  + String(_device.getVendorId(),  HEX) + "\""
        + ",\"pid\":\"0x"  + String(_device.getProductId(), HEX) + "\"},";
 
@@ -146,27 +249,9 @@ void WebUI::_handleStatus() {
        + ",\"psram\":"   + String(ESP.getFreePsram()) + "}";
 
     j += "}";
-    _server.send(200, "application/json", j);
+    return j;
 }
 
-void WebUI::_handleUsbIpKick() {
-    _usbip.kickClient();
-    _server.send(200, "application/json", "{\"ok\":true}");
-}
-
-void WebUI::_handleWifiConnect() {
-    String ssid = _server.arg("ssid");
-    String pass = _server.arg("password");
-    if (!ssid.length()) { _server.send(400, "application/json", "{\"error\":\"SSID required\"}"); return; }
-    bool ok = _wifi.setCredentials(ssid, pass);
-    _server.send(200, "application/json",
-        "{\"success\":" + String(ok ? "true" : "false") + ",\"ip\":\"" + _wifi.getIP() + "\"}");
-}
-
-void WebUI::_handleRestart() {
-    _server.send(200, "application/json", "{\"ok\":true}");
-    delay(300); ESP.restart();
-}
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -221,6 +306,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 </style>
 </head>
 <body>
+<div id="wsb" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9;padding:6px 12px;background:#92400e;color:#fef3c7;font-size:.8rem;text-align:center">Live status disconnected - reconnecting... (reload the page if this persists)</div>
 <div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center"><h1>%DEVNAME%</h1><button class="btn bs" onclick="logout()">Logout</button></div>
 
@@ -313,8 +399,7 @@ function ago(s) {
   return Math.floor(s/86400) + 'd ago';
 }
 
-function updateStatus() {
-  fetch('/api/status').then(r => { if (r.status === 401) { location.reload(); throw 0; } return r.json(); }).then(d => {
+function applyStatus(d) {
 
     // USB device
     var pc = document.getElementById('p-conn');
@@ -383,7 +468,6 @@ function updateStatus() {
     document.getElementById('s-heap').textContent  = (d.sys.heap/1024).toFixed(0)+' KB';
     document.getElementById('s-psram').textContent = (d.sys.psram/1024).toFixed(0)+' KB';
 
-  }).catch(function(){});
 }
 
 function loadLogs() {
@@ -420,8 +504,7 @@ function copyLogs(btn) {
 
 function kickClient() {
   if (!confirm('Disconnect the current USB/IP client?')) return;
-  fetch('/api/usbip/kick', {method:'POST'})
-    .then(function(){ updateStatus(); });
+  fetch('/api/usbip/kick', {method:'POST'});     // the next pushed status shows the result
 }
 
 function logout() {
@@ -435,15 +518,22 @@ function copyCmd(btn) {
 function scan() {
   var s = document.getElementById('nets');
   s.innerHTML = '<option>Scanning...</option>';
-  fetch('/api/wifi/scan').then(r => r.json()).then(nets => {
-    s.innerHTML = '<option value="">— Select network —</option>';
-    nets.sort((a,b) => b.rssi-a.rssi).forEach(n => {
-      var o = document.createElement('option');
-      o.value = n.ssid;
-      o.textContent = n.ssid + ' (' + n.rssi + ' dBm)' + (n.secure ? ' 🔒' : '');
-      s.appendChild(o);
-    });
-  });
+  var tries = 0;
+  (function poll() {
+    fetch('/api/wifi/scan').then(function(r) {
+      if (r.status === 202 && tries++ < 15) { setTimeout(poll, 1000); throw 0; }   // still scanning
+      return r.json();
+    }).then(function(nets) {
+      if (!Array.isArray(nets)) { s.innerHTML = '<option value="">Scan failed - try again</option>'; return; }
+      s.innerHTML = '<option value="">— Select network —</option>';
+      nets.sort(function(a, b) { return b.rssi - a.rssi; }).forEach(function(n) {
+        var o = document.createElement('option');
+        o.value = n.ssid;
+        o.textContent = n.ssid + ' (' + n.rssi + ' dBm)' + (n.secure ? ' 🔒' : '');
+        s.appendChild(o);
+      });
+    }).catch(function() {});
+  })();
 }
 
 function connect() {
@@ -453,9 +543,23 @@ function connect() {
   fetch('/api/wifi/connect', {method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'ssid='+encodeURIComponent(ssid)+'&password='+encodeURIComponent(pass)})
-  .then(r => r.json()).then(d => {
-    if (d.success) { alert('Connected!\nNew IP: '+d.ip+'\nRefreshing...'); setTimeout(()=>location.href='http://'+d.ip, 5000); }
-    else alert('Connection failed — check password');
+  .then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.accepted) { alert(d.error || 'Busy, try again'); return; }
+    pollWifi(0);
+  });
+}
+
+// The device joins in the background and the setup network drops while it does, so the page
+// polls for the result and explains what to do if contact is lost.
+function pollWifi(n) {
+  fetch('/api/wifi/result').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.state === 'ok') { alert('Connected!\nNew IP: ' + d.ip + '\nRefreshing...'); setTimeout(function() { location.href = 'http://' + d.ip; }, 5000); }
+    else if (d.state === 'failed') alert('Connection failed — check password');
+    else if (n < 30) setTimeout(function() { pollWifi(n + 1); }, 1000);
+    else alert('Still connecting - check the device log');
+  }).catch(function() {
+    if (n < 30) setTimeout(function() { pollWifi(n + 1); }, 1500);
+    else alert('Lost contact. The setup network drops when the device joins your WiFi: reconnect to your normal network and open the device IP.');
   });
 }
 
@@ -466,8 +570,24 @@ function restart() {
   setTimeout(()=>location.reload(), 15000);
 }
 
-updateStatus();
-setInterval(updateStatus, 2000);
+// Status is pushed over a WebSocket once a second; the page never polls. The first frame
+// arrives as soon as the socket opens. If the socket drops it reconnects with a growing delay.
+var wsLive = false, wsDelay = 1000;
+function setLive(on) {
+  wsLive = on;
+  var b = document.getElementById('wsb');
+  if (b) b.style.display = on ? 'none' : 'block';
+}
+function startWs() {
+  var ws;
+  try { ws = new WebSocket('ws://' + location.host + '/ws'); }
+  catch (e) { setLive(false); setTimeout(startWs, wsDelay); return; }
+  ws.onopen    = function()  { wsDelay = 1000; };
+  ws.onmessage = function(e) { setLive(true); try { applyStatus(JSON.parse(e.data)); } catch (x) {} };
+  ws.onclose   = function()  { setLive(false); setTimeout(startWs, wsDelay); wsDelay = Math.min(wsDelay * 2, 10000); };
+}
+setLive(false);
+startWs();
 </script>
 </body>
 </html>

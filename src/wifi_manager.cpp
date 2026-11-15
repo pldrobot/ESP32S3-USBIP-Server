@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "applog.h"
+#include <esp_task_wdt.h>
 
 WiFiManager::WiFiManager() : _mode(WSTATE_NONE), _lastReconnect(0) {}
 
@@ -30,13 +31,15 @@ void WiFiManager::task() {
 }
 
 bool WiFiManager::setCredentials(const String& ssid, const String& pass) {
+    const String oldSsid = _ssid, oldPass = _password;
     _ssid = ssid; _password = pass;
-    _saveCredentials();
     WiFi.softAPdisconnect(true);
     if (_connectStation()) {
+        _saveCredentials();                // only remember credentials that actually worked
         debugI("WiFi Connected, IP: %s", getIP().c_str());
         return true;
     }
+    _ssid = oldSsid; _password = oldPass;
     _startAP();
     return false;
 }
@@ -47,17 +50,25 @@ String WiFiManager::getIP() const {
     return "0.0.0.0";
 }
 
-String WiFiManager::scanNetworks() {
-    int n = WiFi.scanNetworks();
-    String json = "[";
+bool WiFiManager::scanPoll(String& json) {
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return false;
+    if (n < 0) { WiFi.scanNetworks(true); return false; }     // none started yet (or it failed): start one
+    json = "[";
     for (int i = 0; i < n; i++) {
         if (i) json += ",";
-        json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",";
+        String ssid = WiFi.SSID(i);          // arbitrary bytes: escape for JSON
+        ssid.replace("\\", "\\\\");
+        ssid.replace("\"", "\\\"");
+        for (unsigned k = 0; k < ssid.length(); k++)
+            if ((uint8_t)ssid[k] < 0x20) ssid.setCharAt(k, ' ');
+        json += "{\"ssid\":\"" + ssid + "\",";
         json += "\"rssi\":"  + String(WiFi.RSSI(i)) + ",";
         json += "\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
     }
     WiFi.scanDelete();
-    return json + "]";
+    json += "]";
+    return true;
 }
 
 void WiFiManager::reconnect() {
@@ -89,6 +100,7 @@ bool WiFiManager::_connectStation() {
     WiFi.begin(_ssid.c_str(), _password.c_str());
     for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) {
         delay(500);
+        if (esp_task_wdt_status(NULL) == ESP_OK) esp_task_wdt_reset();   // up to 15 s here; only once subscribed
         Serial.print(".");
     }
     Serial.println();

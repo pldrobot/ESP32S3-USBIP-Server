@@ -21,7 +21,9 @@ public:
     String    getHostname()  const { return _hostname; }
     int       getRSSI()      const { return WiFi.RSSI(); }
 
-    String    scanNetworks();
+    // Non-blocking scan for the async web server: returns false while a scan runs (one is
+    // started if none is), true with the JSON array once results are in.
+    bool      scanPoll(String& json);
     void      reconnect();
 
 private:
