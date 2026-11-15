@@ -105,11 +105,15 @@ h1{font-size:1.2rem;margin-bottom:16px}
 input{width:100%;padding:9px 11px;margin-bottom:10px;background:#0f172a;border:1px solid #475569;border-radius:7px;color:#e2e8f0;font-size:.9rem}
 input:focus{outline:none;border-color:#3b82f6}
 button{width:100%;padding:9px;border:none;border-radius:7px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
-.err{color:#fca5a5;font-size:.82rem;margin-bottom:10px}</style></head><body>
+.err{color:#fca5a5;font-size:.82rem;margin-bottom:10px}
+.pw{position:relative}.pw input{padding-right:58px}
+.pw button{position:absolute;right:4px;top:4px;width:auto;padding:5px 9px;background:none;color:#94a3b8;font-size:.78rem;font-weight:500}
+.pw button:hover{color:#e2e8f0}</style></head><body>
 <form method="POST" action="/login"><h1>USB/IP Server Login</h1>)rawliteral";
     if (failed) p += "<div class=\"err\">Invalid username or password</div>";
     p += R"rawliteral(<input name="user" placeholder="Username" autocomplete="username" autofocus>
-<input name="password" type="password" placeholder="Password" autocomplete="current-password">
+<div class="pw"><input id="pw" name="password" type="password" placeholder="Password" autocomplete="current-password">
+<button type="button" id="pwt" aria-label="Show password" onclick="var i=document.getElementById('pw'),s=i.type=='password';i.type=s?'text':'password';this.textContent=s?'Hide':'Show';this.setAttribute('aria-label',s?'Hide password':'Show password')">Show</button></div>
 <button type="submit">Sign in</button></form></body></html>)rawliteral";
     return p;
 }
@@ -240,7 +244,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 <div class="sect">Attach Command</div>
 <div class="cmd-wrap">
   <div id="u-cmd" class="cmd-box">usbip attach -r … -b 1-1</div>
-  <button class="btn bs" onclick="copyCmd()">Copy</button>
+  <button class="btn bs" onclick="copyCmd(this)">Copy</button>
 </div>
 
 <div id="u-hist-wrap" style="display:none">
@@ -285,7 +289,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 <h2>Logs</h2>
 <div class="brow" style="margin-top:0;margin-bottom:8px">
   <button class="btn bp" onclick="loadLogs()">Load / Refresh</button>
-  <button class="btn bs" onclick="copyLogs()">Copy</button>
+  <button class="btn bs" onclick="copyLogs(this)">Copy</button>
 </div>
 <pre id="logbox" style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px;font-size:.7rem;color:#cbd5e1;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-all">Press Load to view (current boot + previous boots, survives crashes).</pre>
 </div>
@@ -388,8 +392,30 @@ function loadLogs() {
   fetch('/api/logs').then(function(r){ if (r.status===401){location.reload();throw 0;} return r.text(); })
     .then(function(t){ b.textContent = t; b.scrollTop = 0; }).catch(function(){});
 }
-function copyLogs() {
-  navigator.clipboard.writeText(document.getElementById('logbox').textContent);
+// navigator.clipboard only exists on HTTPS/localhost; this page is plain HTTP,
+// so fall back to a hidden textarea + execCommand('copy').
+function copyText(txt, btn) {
+  function done(ok) {
+    if (!btn) return;
+    var old = btn.textContent;
+    btn.textContent = ok ? 'Copied!' : 'Failed';
+    setTimeout(function(){ btn.textContent = old; }, 1500);
+  }
+  function legacy() {
+    var ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    done(ok);
+  }
+  if (navigator.clipboard && window.isSecureContext)
+    navigator.clipboard.writeText(txt).then(function(){ done(true); }, legacy);
+  else legacy();
+}
+function copyLogs(btn) {
+  copyText(document.getElementById('logbox').textContent, btn);
 }
 
 function kickClient() {
@@ -402,12 +428,8 @@ function logout() {
   fetch('/api/logout', {method:'POST'}).then(function(){ location.reload(); });
 }
 
-function copyCmd() {
-  var cmd = document.getElementById('u-cmd').textContent;
-  navigator.clipboard.writeText(cmd).then(function(){
-    var b = event.target; b.textContent='Copied!';
-    setTimeout(function(){ b.textContent='Copy'; }, 1500);
-  });
+function copyCmd(btn) {
+  copyText(document.getElementById('u-cmd').textContent, btn);
 }
 
 function scan() {
