@@ -49,7 +49,11 @@ void setupOTA() {
     ArduinoOTA.setHostname(OTA_HOSTNAME);
     if (strlen(OTA_PASSWORD) > 0) ArduinoOTA.setPassword(OTA_PASSWORD);
     ArduinoOTA.onStart([]()  { debugI("OTA starting..."); });
-    ArduinoOTA.onProgress([](unsigned p, unsigned t) { debugI("OTA %u%%", p/(t/100)); });
+    ArduinoOTA.onProgress([](unsigned p, unsigned t) {
+        static unsigned lastStep = 101;
+        unsigned pct = t >= 100 ? p / (t / 100) : 0;
+        if (pct / 10 != lastStep) { lastStep = pct / 10; debugI("OTA %u%%", pct); }
+    });
     ArduinoOTA.onEnd([]()    { debugI("OTA done — rebooting"); });
     ArduinoOTA.begin();
     debugI("OTA ready on %s.local (port 3232)", OTA_HOSTNAME);
@@ -101,9 +105,15 @@ void setup() {
     webUI.begin();
 
     // 6 — Watchdog
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+    // Arduino core 3.x (ESP-IDF 5): config-struct API
     esp_task_wdt_config_t wdtCfg = { .timeout_ms = WDT_TIMEOUT_SEC * 1000,
                                       .idle_core_mask = 0, .trigger_panic = true };
     esp_task_wdt_init(&wdtCfg);
+#else
+    // Arduino core 2.x (ESP-IDF 4): (timeout_sec, panic) API
+    esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+#endif
     esp_task_wdt_add(NULL);
 
     if (wifiMgr.isConnected()) {
