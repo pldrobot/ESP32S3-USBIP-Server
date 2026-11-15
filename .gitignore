@@ -10,3 +10,6 @@ src/config_env.h
 
 # Local helper scripts
 upload.ps1
+
+# Local junction to the sibling EspUsbIpServer working copy (see platformio.ini)
+/lib/EspUsbIpServer
