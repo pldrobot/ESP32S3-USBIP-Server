@@ -6,6 +6,8 @@
 
 # Local config — never commit
 .env
+.env*
+!.env.template
 src/config_env.h
 
 # Local helper scripts
